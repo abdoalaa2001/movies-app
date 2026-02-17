@@ -4,18 +4,17 @@ import axios from "axios";
 import { useRouter } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
-  ActivityIndicator,
-  FlatList,
-  Image,
-  StyleSheet,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    FlatList,
+    Image,
+    StyleSheet,
+    TouchableOpacity,
+    View,
 } from "react-native";
 
 const API_BASE = "https://en.movizlands.com/wp-json/wp/v2";
-const MOVIES_CATEGORY = 79;
 
-interface Movie {
+interface Content {
   id: number;
   title: { rendered: string };
   link: string;
@@ -25,19 +24,19 @@ interface Movie {
   };
 }
 
-export default function MoviesScreen() {
+export default function ListScreen() {
   const router = useRouter();
-  const [movies, setMovies] = useState<Movie[]>([]);
+  const [content, setContent] = useState<Content[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
 
   useEffect(() => {
-    loadMovies();
+    loadContent();
   }, []);
 
-  const loadMovies = async (pageNum = 1, append = false) => {
+  const loadContent = async (pageNum = 1, append = false) => {
     if (pageNum === 1) {
       setLoading(true);
     } else {
@@ -49,31 +48,22 @@ export default function MoviesScreen() {
         params: {
           per_page: 30,
           page: pageNum,
-          categories: MOVIES_CATEGORY,
           _embed: true,
         },
       });
 
-      const newMovies = response.data;
+      const newContent = response.data;
 
       if (append) {
-        setMovies((prev) => [...prev, ...newMovies]);
+        setContent((prev) => [...prev, ...newContent]);
       } else {
-        setMovies(newMovies);
+        setContent(newContent);
       }
 
-      // Check if there are more pages
       const totalPages = parseInt(response.headers["x-wp-totalpages"] || "1");
       setHasMore(pageNum < totalPages);
     } catch (error) {
       console.error("Error:", error);
-      if (pageNum === 1) {
-        // Fallback: load all posts if category doesn't exist
-        const response = await axios.get(`${API_BASE}/posts`, {
-          params: { per_page: 30, page: pageNum, _embed: true },
-        });
-        setMovies(response.data);
-      }
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -84,20 +74,20 @@ export default function MoviesScreen() {
     if (!loadingMore && hasMore) {
       const nextPage = page + 1;
       setPage(nextPage);
-      loadMovies(nextPage, true);
+      loadContent(nextPage, true);
     }
   };
 
   const handleRefresh = () => {
     setPage(1);
     setHasMore(true);
-    loadMovies(1, false);
+    loadContent(1, false);
   };
 
-  const getFeaturedImage = (movie: Movie): string => {
+  const getFeaturedImage = (item: Content): string => {
     try {
-      if (movie._embedded?.["wp:featuredmedia"]?.[0]) {
-        return movie._embedded["wp:featuredmedia"][0].source_url;
+      if (item._embedded?.["wp:featuredmedia"]?.[0]) {
+        return item._embedded["wp:featuredmedia"][0].source_url;
       }
     } catch (error) {}
     return "https://via.placeholder.com/300x450/1a1a1a/ffffff?text=No+Image";
@@ -110,20 +100,20 @@ export default function MoviesScreen() {
       .replace(/&[a-z]+;/gi, "");
   };
 
-  const handleMoviePress = (movie: Movie) => {
+  const handlePress = (item: Content) => {
     router.push({
       pathname: "/player",
       params: {
-        url: movie.link,
-        title: cleanTitle(movie.title.rendered),
+        url: item.link,
+        title: cleanTitle(item.title.rendered),
       },
     } as any);
   };
 
-  const renderMovie = ({ item }: { item: Movie }) => (
+  const renderItem = ({ item }: { item: Content }) => (
     <TouchableOpacity
       style={styles.card}
-      onPress={() => handleMoviePress(item)}
+      onPress={() => handlePress(item)}
       activeOpacity={0.8}
     >
       <Image
@@ -155,21 +145,21 @@ export default function MoviesScreen() {
   return (
     <ThemedView style={styles.container}>
       <View style={styles.header}>
-        <ThemedText style={styles.headerTitle}>🎬 الأفلام</ThemedText>
+        <ThemedText style={styles.headerTitle}>📋 القائمة الكاملة</ThemedText>
         <ThemedText style={styles.headerSubtitle}>
-          {movies.length} فيلم
+          {content.length} عنصر
         </ThemedText>
       </View>
 
-      {loading && movies.length === 0 ? (
+      {loading && content.length === 0 ? (
         <View style={styles.loading}>
           <ActivityIndicator size="large" color="#e50914" />
           <ThemedText style={styles.loadingText}>جاري التحميل...</ThemedText>
         </View>
       ) : (
         <FlatList
-          data={movies}
-          renderItem={renderMovie}
+          data={content}
+          renderItem={renderItem}
           keyExtractor={(item, index) => `${item.id}-${index}`}
           numColumns={2}
           contentContainerStyle={styles.list}
