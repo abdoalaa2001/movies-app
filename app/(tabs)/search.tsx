@@ -2,69 +2,84 @@ import { ThemedText } from "@/components/themed-text";
 import { ThemedView } from "@/components/themed-view";
 import axios from "axios";
 import { useRouter } from "expo-router";
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
-    ActivityIndicator,
-    FlatList,
-    Image,
-    StyleSheet,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  FlatList,
+  Image,
+  Keyboard,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 
 const API_BASE = "https://en.movizlands.com/wp-json/wp/v2";
+
+const BG = "#0b0b0b";
+const GOLD = "#b08d00";
 
 interface SearchResult {
   id: number;
   title: { rendered: string };
   link: string;
   date: string;
+  categories?: number[];
   _embedded?: {
-    "wp:featuredmedia"?: Array<{ source_url: string }>;
+    "wp:featuredmedia"?: { source_url: string }[];
   };
 }
 
+// لو عندك IDs تانية للأفلام/المسلسلات غيّرها هنا فقط
+const MOVIES_CATEGORY = 79;
+const SERIES_CATEGORY = 9;
+
+type FilterMode = "all" | "movies" | "series";
+
 export default function SearchScreen() {
   const router = useRouter();
+
   const [searchQuery, setSearchQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<FilterMode>("all");
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
+    Keyboard.dismiss();
 
     try {
       setLoading(true);
       const response = await axios.get(`${API_BASE}/posts`, {
         params: {
           search: searchQuery,
-          per_page: 30,
+          per_page: 50,
           _embed: true,
         },
       });
-      setResults(response.data);
+      setResults(response.data || []);
     } catch (error) {
       console.error("Error:", error);
+      setResults([]);
     } finally {
       setLoading(false);
     }
   };
 
   const getFeaturedImage = (item: SearchResult): string => {
-    try {
-      if (item._embedded?.["wp:featuredmedia"]?.[0]) {
-        return item._embedded["wp:featuredmedia"][0].source_url;
-      }
-    } catch (error) {}
-    return "https://via.placeholder.com/300x450/1a1a1a/ffffff?text=No+Image";
+    const u = item._embedded?.["wp:featuredmedia"]?.[0]?.source_url;
+    return (
+      u || "https://via.placeholder.com/1200x700/111111/ffffff?text=No+Image"
+    );
   };
 
   const cleanTitle = (htmlTitle: string): string => {
     return htmlTitle
       .replace(/<[^>]*>/g, "")
       .replace(/&#\d+;/g, "")
-      .replace(/&[a-z]+;/gi, "");
+      .replace(/&[a-z]+;/gi, "")
+      .trim();
   };
 
   const handlePress = (item: SearchResult) => {
@@ -77,68 +92,108 @@ export default function SearchScreen() {
     } as any);
   };
 
+  // فلتر اختياري (الكل/أفلام/مسلسلات) باستخدام categories اللي موجودة في نفس الداتا
+  const filtered = useMemo(() => {
+    if (mode === "all") return results;
+
+    return results.filter((p) => {
+      const cats = p.categories || [];
+      if (mode === "movies") return cats.includes(MOVIES_CATEGORY);
+      if (mode === "series") return cats.includes(SERIES_CATEGORY);
+      return true;
+    });
+  }, [results, mode]);
+
   const renderItem = ({ item }: { item: SearchResult }) => (
-    <TouchableOpacity
-      style={styles.card}
-      onPress={() => handlePress(item)}
-      activeOpacity={0.8}
-    >
+    <Pressable style={styles.card} onPress={() => handlePress(item)}>
       <Image
         source={{ uri: getFeaturedImage(item) }}
         style={styles.poster}
         resizeMode="cover"
       />
-      <View style={styles.overlay}>
-        <ThemedText style={styles.title} numberOfLines={2}>
-          {cleanTitle(item.title.rendered)}
-        </ThemedText>
-        <ThemedText style={styles.date}>
-          {new Date(item.date).toLocaleDateString()}
-        </ThemedText>
-      </View>
-    </TouchableOpacity>
+
+      {/* Fade */}
+      <View style={styles.fade} />
+
+      {/* Title */}
+      <Text style={styles.title} numberOfLines={1}>
+        {cleanTitle(item.title.rendered)}
+      </Text>
+
+      {/* Date */}
+      <Text style={styles.date}>
+        {new Date(item.date).toLocaleDateString()}
+      </Text>
+    </Pressable>
   );
 
   return (
     <ThemedView style={styles.container}>
+      {/* Header */}
       <View style={styles.header}>
         <ThemedText style={styles.headerTitle}>🔍 البحث</ThemedText>
+        <ThemedText style={styles.headerSub}>ابحث عن فيلم أو مسلسل</ThemedText>
       </View>
 
-      {/* Search Input */}
-      <View style={styles.searchContainer}>
+      {/* Search box */}
+      <View style={styles.searchWrap}>
         <TextInput
           style={styles.searchInput}
-          placeholder="ابحث عن فيلم أو مسلسل..."
-          placeholderTextColor="#666"
+          placeholder="اكتب اسم الفيلم/المسلسل..."
+          placeholderTextColor="rgba(255,255,255,0.45)"
           value={searchQuery}
           onChangeText={setSearchQuery}
           onSubmitEditing={handleSearch}
           returnKeyType="search"
         />
-        <TouchableOpacity style={styles.searchButton} onPress={handleSearch}>
-          <ThemedText style={styles.searchButtonText}>بحث</ThemedText>
-        </TouchableOpacity>
+
+        <Pressable style={styles.searchBtn} onPress={handleSearch}>
+          <Text style={styles.searchBtnText}>بحث</Text>
+        </Pressable>
       </View>
 
-      {/* Results */}
+      {/* Filter pills (optional) */}
+      <View style={styles.pills}>
+        <Pressable
+          onPress={() => setMode("all")}
+          style={[styles.pill, mode === "all" && styles.pillActive]}
+        >
+          <Text style={styles.pillText}>الكل</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setMode("movies")}
+          style={[styles.pill, mode === "movies" && styles.pillActive]}
+        >
+          <Text style={styles.pillText}>أفلام</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => setMode("series")}
+          style={[styles.pill, mode === "series" && styles.pillActive]}
+        >
+          <Text style={styles.pillText}>مسلسلات</Text>
+        </Pressable>
+      </View>
+
+      {/* Content */}
       {loading ? (
         <View style={styles.loading}>
-          <ActivityIndicator size="large" color="#e50914" />
+          <ActivityIndicator size="large" color={GOLD} />
           <ThemedText style={styles.loadingText}>جاري البحث...</ThemedText>
         </View>
-      ) : results.length > 0 ? (
+      ) : filtered.length > 0 ? (
         <FlatList
-          data={results}
+          data={filtered}
           renderItem={renderItem}
-          keyExtractor={(item) => item.id.toString()}
-          numColumns={2}
+          keyExtractor={(item) => String(item.id)}
           contentContainerStyle={styles.list}
+          showsVerticalScrollIndicator={false}
         />
       ) : (
         <View style={styles.empty}>
           <ThemedText style={styles.emptyText}>
-            {searchQuery ? "لا توجد نتائج" : "ابحث عن أي شيء..."}
+            {searchQuery ? "لا توجد نتائج" : "ابدأ بالبحث..."}
           </ThemedText>
         </View>
       )}
@@ -147,91 +202,126 @@ export default function SearchScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
+  container: { flex: 1, backgroundColor: BG },
+
   header: {
-    padding: 20,
-    paddingTop: 60,
-    borderBottomWidth: 3,
-    borderBottomColor: "#e50914",
+    paddingHorizontal: 16,
+    paddingTop: 58,
+    paddingBottom: 14,
   },
   headerTitle: {
     fontSize: 32,
-    fontWeight: "bold",
-    color: "#e50914",
+    fontWeight: "900",
+    color: GOLD,
   },
-  searchContainer: {
+  headerSub: {
+    marginTop: 4,
+    color: "rgba(255,255,255,0.70)",
+    fontSize: 13,
+  },
+
+  searchWrap: {
     flexDirection: "row",
-    padding: 16,
+    paddingHorizontal: 16,
     gap: 12,
+    marginTop: 6,
   },
   searchInput: {
     flex: 1,
-    backgroundColor: "#2a2a2a",
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     color: "#fff",
     fontSize: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
-  searchButton: {
-    backgroundColor: "#e50914",
-    borderRadius: 12,
-    paddingHorizontal: 24,
+  searchBtn: {
+    backgroundColor: "rgba(176,141,0,0.18)",
+    borderRadius: 16,
+    paddingHorizontal: 20,
     justifyContent: "center",
+    borderWidth: 1,
+    borderColor: GOLD,
   },
-  searchButtonText: {
+  searchBtnText: {
     color: "#fff",
     fontSize: 16,
-    fontWeight: "bold",
+    fontWeight: "900",
   },
-  loading: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  loadingText: {
+
+  pills: {
+    flexDirection: "row",
+    paddingHorizontal: 16,
+    gap: 10,
     marginTop: 12,
-    fontSize: 16,
+    marginBottom: 8,
   },
-  empty: {
+  pill: {
     flex: 1,
-    justifyContent: "center",
+    paddingVertical: 12,
+    borderRadius: 999,
     alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
   },
-  emptyText: {
-    fontSize: 16,
-    opacity: 0.5,
+  pillActive: {
+    backgroundColor: "rgba(176,141,0,0.12)",
+    borderColor: GOLD,
   },
+  pillText: { color: "#fff", fontWeight: "900" },
+
+  loading: { flex: 1, justifyContent: "center", alignItems: "center" },
+  loadingText: { marginTop: 12, color: "#fff", opacity: 0.8 },
+
+  empty: { flex: 1, justifyContent: "center", alignItems: "center" },
+  emptyText: { color: "#fff", opacity: 0.5, fontSize: 16 },
+
   list: {
-    padding: 8,
+    paddingHorizontal: 14,
+    paddingBottom: 24,
+    paddingTop: 6,
+    gap: 12,
   },
+
+  // Wide card like ArabSeed sections (but vertical list)
   card: {
-    flex: 1,
-    margin: 8,
-    backgroundColor: "#ffffff",
-    borderRadius: 12,
-    overflow: "hidden",
-    elevation: 8,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5,
-    shadowRadius: 8,
-  },
-  poster: {
     width: "100%",
-    height: 250,
-    backgroundColor: "#1a1a1a",
+    height: 190,
+    borderRadius: 22,
+    overflow: "hidden",
+    backgroundColor: "#111",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
-  overlay: {
-    padding: 12,
-    backgroundColor: "rgba(255, 255, 255, 0.8)",
+  poster: { width: "100%", height: "100%" },
+
+  fade: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 92,
+    backgroundColor: "rgba(0,0,0,0.60)",
   },
   title: {
-    fontSize: 14,
-    fontWeight: "bold",
-    marginBottom: 6,
+    position: "absolute",
+    right: 14,
+    bottom: 34,
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "900",
+    maxWidth: "78%",
+    textAlign: "right",
   },
   date: {
+    position: "absolute",
+    right: 14,
+    bottom: 14,
+    color: "rgba(255,255,255,0.75)",
     fontSize: 12,
-    opacity: 0.7,
+    fontWeight: "700",
   },
 });
