@@ -1,198 +1,166 @@
-import { ThemedText } from "@/components/themed-text";
+/**
+ * index.tsx — Movies / Home Screen
+ * PERF: Lazy loads category sections one-by-one as they resolve.
+ *       Pinned "latest" + "trending" sections appear immediately.
+ */
+
 import { ThemedView } from "@/components/themed-view";
-import axios from "axios";
 import { useRouter } from "expo-router";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Dimensions,
   FlatList,
   Image,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from "react-native";
+import {
+  COUNTRY_META,
+  DynamicSection,
+  LANG_META,
+  WPPost,
+  cleanTitle,
+  discoverSeriesCategories,
+  fetchCategories,
+  fetchLatestPosts,
+  fetchPage,
+  fetchTrendingPosts,
+  getClass,
+  getThumb,
+  isMovie,
+} from "./apiUtils";
 
-const API_BASE = "https://en.movizlands.com/wp-json/wp/v2";
-const MOVIES_CATEGORY = 79;
+const W = Dimensions.get("window").width;
 
-// عدد الأقسام اللي تحت بعض (زي ArabSeed)
-const SECTIONS_COUNT = 8;
+const SERIES_KEYWORDS = [
+  "مسلسل",
+  "مسلسلات",
+  "series",
+  "episode",
+  "حلقة",
+  "حلقات",
+  "موسم",
+  "season",
+];
 
-// Slider timing
-const AUTO_MS = 2500;
-
-type TaxMode = "categories" | "tags";
-
-interface WPPost {
-  id: number;
-  title: { rendered: string };
-  link: string;
-  date: string;
-  modified: string;
-  _embedded?: {
-    "wp:featuredmedia"?: { source_url: string }[];
-  };
+function emojiForCat(name: string): string {
+  const n = name.toLowerCase();
+  if (n.includes("تركي") || n.includes("turk")) return "🇹🇷";
+  if (n.includes("كوري") || n.includes("korean")) return "🇰🇷";
+  if (n.includes("هندي") || n.includes("hindi")) return "🇮🇳";
+  if (n.includes("عربي") || n.includes("arab")) return "🌍";
+  if (n.includes("أجنبي") || n.includes("foreign") || n.includes("english"))
+    return "🌐";
+  if (n.includes("أنمي") || n.includes("anime")) return "🎌";
+  if (n.includes("مسلسل") || n.includes("series")) return "📺";
+  if (n.includes("فيلم") || n.includes("movie")) return "🎬";
+  if (n.includes("رعب") || n.includes("horror")) return "👻";
+  if (n.includes("كوميد") || n.includes("comedy")) return "😂";
+  if (n.includes("رومانس") || n.includes("romance")) return "💕";
+  if (n.includes("أكشن") || n.includes("action")) return "💥";
+  return "🎬";
 }
 
-interface WPTerm {
-  id: number;
-  name: string;
-  count?: number;
-  slug?: string;
+function PostPill({ post }: { post: WPPost }) {
+  const countryId = getClass(post, "country");
+  const langId = getClass(post, "language");
+  const flag = countryId ? COUNTRY_META[countryId]?.emoji : null;
+  const lbl = langId ? LANG_META[langId]?.label : null;
+  if (!flag && !lbl) return null;
+  return (
+    <View style={s.pill}>
+      <Text style={s.pillTxt}>{[flag, lbl].filter(Boolean).join("  ")}</Text>
+    </View>
+  );
 }
 
-type Section = {
-  id: number;
-  title: string;
-};
-
-type SlideItem = {
-  id: number;
-  title: string;
-  image: string;
-  onPress: () => void;
-};
-
-/* =========================
-   SectionSlider (Card كبير + Auto + أسهم)
-========================= */
-function SectionSlider({
-  sectionTitle,
-  leftButtonText,
-  items,
-  autoMs = AUTO_MS,
+function Banner({
+  section,
+  onPress,
 }: {
-  sectionTitle: string;
-  leftButtonText: string;
-  items: SlideItem[];
-  autoMs?: number;
+  section: DynamicSection;
+  onPress: (p: WPPost) => void;
 }) {
-  const listRef = useRef<FlatList<SlideItem> | null>(null);
-  const [index, setIndex] = useState(0);
-
-  const W = Dimensions.get("window").width;
-  const cardW = W - 28;
-  const cardH = Math.round(cardW * 0.52);
+  const listRef = useRef<FlatList<WPPost>>(null);
+  const [idx, setIdx] = useState(0);
+  const cW = W - 28;
+  const cH = Math.round(cW * 0.52);
+  const { posts } = section;
 
   useEffect(() => {
-    setIndex(0);
-    if (items.length > 0) {
-      setTimeout(() => {
-        listRef.current?.scrollToIndex({ index: 0, animated: false });
-      }, 50);
-    }
-  }, [items.length]);
-
-  // Auto-slide
-  useEffect(() => {
-    if (items.length < 2) return;
-
+    if (posts.length < 2) return;
     const t = setInterval(() => {
-      setIndex((prev) => {
-        const next = prev + 1 >= items.length ? 0 : prev + 1;
-        listRef.current?.scrollToIndex({ index: next, animated: true });
-        return next;
+      setIdx((i) => {
+        const n = (i + 1) % posts.length;
+        listRef.current?.scrollToIndex({ index: n, animated: true });
+        return n;
       });
-    }, autoMs);
-
+    }, 3500);
     return () => clearInterval(t);
-  }, [items.length, autoMs]);
+  }, [posts.length]);
 
-  const goPrev = () => {
-    if (!items.length) return;
-    const prev = index - 1 < 0 ? items.length - 1 : index - 1;
-    setIndex(prev);
-    listRef.current?.scrollToIndex({ index: prev, animated: true });
-  };
-
-  const goNext = () => {
-    if (!items.length) return;
-    const next = index + 1 >= items.length ? 0 : index + 1;
-    setIndex(next);
-    listRef.current?.scrollToIndex({ index: next, animated: true });
+  const shift = (d: 1 | -1) => {
+    const n = (idx + d + posts.length) % posts.length;
+    setIdx(n);
+    listRef.current?.scrollToIndex({ index: n, animated: true });
   };
 
   return (
-    <View style={styles.sectionWrap}>
-      {/* Header row */}
-      <View style={styles.sectionHeader}>
-        <Pressable style={styles.leftBtn}>
-          <Text style={styles.leftBtnText}>↓</Text>
-          <Text style={styles.leftBtnText}>{leftButtonText}</Text>
-          <Text style={styles.leftBtnText}>≡</Text>
-        </Pressable>
-
-        <View style={styles.rightTitle}>
-          <Text style={styles.sectionTitle}>{sectionTitle}</Text>
-          <Text style={styles.icon}>🎬</Text>
-        </View>
+    <View style={s.section}>
+      <View style={s.hdr}>
+        <Text style={s.hdrCount}>{posts.length} عنصر</Text>
+        <Text style={s.hdrTitle}>
+          {section.emoji} {section.label}
+        </Text>
       </View>
-
-      {/* Slider Card */}
-      <View style={[styles.sliderCard, { width: cardW, height: cardH }]}>
-        {items.length === 0 ? (
-          <View style={styles.sliderEmpty}>
-            <ActivityIndicator size="small" color="#b08d00" />
-            <Text style={{ color: "#fff", opacity: 0.7, marginTop: 8 }}>
-              لا توجد نتائج
-            </Text>
-          </View>
-        ) : (
-          <>
-            <FlatList
-              ref={(r) => {
-                listRef.current = r; // ✅ مهم: callback يرجع void
-              }}
-              horizontal
-              pagingEnabled
-              data={items}
-              keyExtractor={(x) => String(x.id)}
-              showsHorizontalScrollIndicator={false}
-              getItemLayout={(_, i) => ({
-                length: cardW,
-                offset: cardW * i,
-                index: i,
-              })}
-              onMomentumScrollEnd={(e) => {
-                const newIndex = Math.round(
-                  e.nativeEvent.contentOffset.x / cardW,
-                );
-                setIndex(newIndex);
-              }}
-              renderItem={({ item }) => (
-                <Pressable
-                  onPress={item.onPress}
-                  style={{ width: cardW, height: cardH }}
-                >
-                  <Image
-                    source={{ uri: item.image }}
-                    style={{ width: "100%", height: "100%" }}
-                    resizeMode="cover"
-                  />
-                  <View style={styles.fade} />
-                  <Text style={styles.itemTitle} numberOfLines={1}>
-                    {item.title}
-                  </Text>
-                </Pressable>
-              )}
-            />
-
-            {/* Arrows */}
+      <View style={[s.card, { width: cW, height: cH }]}>
+        <FlatList
+          ref={listRef}
+          horizontal
+          pagingEnabled
+          data={posts}
+          keyExtractor={(x) => String(x.id)}
+          showsHorizontalScrollIndicator={false}
+          getItemLayout={(_, i) => ({ length: cW, offset: cW * i, index: i })}
+          onMomentumScrollEnd={(e) =>
+            setIdx(Math.round(e.nativeEvent.contentOffset.x / cW))
+          }
+          renderItem={({ item }) => (
             <Pressable
-              style={[styles.arrow, styles.arrowLeft]}
-              onPress={goPrev}
+              onPress={() => onPress(item)}
+              style={{ width: cW, height: cH }}
             >
-              <Text style={styles.arrowText}>‹</Text>
+              <Image
+                source={{ uri: getThumb(item) }}
+                style={s.img}
+                resizeMode="cover"
+              />
+              <View style={s.fade} />
+              <PostPill post={item} />
+              <Text style={s.itemTitle} numberOfLines={2}>
+                {cleanTitle(item.title.rendered)}
+              </Text>
             </Pressable>
-
-            <Pressable
-              style={[styles.arrow, styles.arrowRight]}
-              onPress={goNext}
-            >
-              <Text style={styles.arrowText}>›</Text>
+          )}
+        />
+        <View style={s.dots}>
+          {posts.map((_: WPPost, i: number) => (
+            <View key={i} style={[s.dot, i === idx && s.dotOn]} />
+          ))}
+        </View>
+        {posts.length > 1 && (
+          <>
+            <Pressable style={[s.arrow, s.aL]} onPress={() => shift(-1)}>
+              <Text style={s.arrowTxt}>‹</Text>
+            </Pressable>
+            <Pressable style={[s.arrow, s.aR]} onPress={() => shift(1)}>
+              <Text style={s.arrowTxt}>›</Text>
             </Pressable>
           </>
         )}
@@ -201,313 +169,187 @@ function SectionSlider({
   );
 }
 
-/* =========================
-   Movies Screen (ArabSeed layout)
-========================= */
 export default function MoviesScreen() {
   const router = useRouter();
-
-  const [mode, setMode] = useState<"trending" | "latest">("latest");
-  const [taxMode, setTaxMode] = useState<TaxMode | null>(null);
-  const [sections, setSections] = useState<Section[]>([]);
-  const [postsBySection, setPostsBySection] = useState<
-    Record<number, WPPost[]>
-  >({});
+  const [sections, setSections] = useState<DynamicSection[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  // tracks keys already added to avoid duplicates during streaming
+  const seenKeys = useRef<Set<string>>(new Set());
 
-  useEffect(() => {
-    init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const addSection = useCallback((sec: DynamicSection) => {
+    if (seenKeys.current.has(sec.key) || sec.posts.length < 2) return;
+    seenKeys.current.add(sec.key);
+    setSections((prev) => [...prev, sec]);
   }, []);
 
+  const load = useCallback(async () => {
+    setError(false);
+    seenKeys.current = new Set();
+    setSections([]);
+
+    try {
+      // ── Step 1: fetch pinned data + categories simultaneously ──
+      const [latest, trending, cats] = await Promise.all([
+        fetchLatestPosts(100),
+        fetchTrendingPosts(50),
+        fetchCategories(),
+      ]);
+
+      discoverSeriesCategories(cats);
+
+      const movies = latest.filter(isMovie);
+      const trendingMovies = trending.filter(isMovie);
+
+      // ── Step 2: show pinned sections immediately — user sees content now ──
+      addSection({
+        key: "latest",
+        label: "أحدث الأفلام",
+        emoji: "🆕",
+        posts: movies.slice(0, 10),
+      });
+      addSection({
+        key: "trending",
+        label: "الأكثر تحديثًا",
+        emoji: "🔥",
+        posts: trendingMovies.slice(0, 10),
+      });
+      setLoading(false); // ← stop spinner as soon as first sections are ready
+
+      // ── Step 3: lazy load each category section one-by-one ──
+      // fire all fetches in parallel but append each to state as it resolves
+      const movieCats = cats.filter((cat) => {
+        if (cat.count < 3) return false;
+        const n = cat.name.toLowerCase();
+        if (n.includes("uncategor") || n.includes("غير مصنف")) return false;
+        return !SERIES_KEYWORDS.some((kw) => n.includes(kw));
+      });
+
+      movieCats.forEach((cat) => {
+        fetchPage(1, 10, { categories: cat.id })
+          .then(({ posts }) => {
+            addSection({
+              key: `cat-${cat.id}`,
+              label: cat.name,
+              emoji: emojiForCat(cat.name),
+              posts,
+            });
+          })
+          .catch(() => {}); // silently skip failed cats
+      });
+    } catch (e) {
+      console.error("MoviesScreen load error:", e);
+      setError(true);
+      setLoading(false);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [addSection]);
+
   useEffect(() => {
-    // لما المستخدم يغيّر ترند/مضاف حديثاً
-    if (taxMode && sections.length) loadAllSections(taxMode, sections, mode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
+    load();
+  }, [load]);
 
-  const init = async () => {
-    setLoading(true);
-    try {
-      // 1) حاول Categories الأول (غالباً ده اللي ArabSeed بيستخدمه)
-      const cats = await fetchTerms("categories");
-      const goodCats = pickGoodTerms(cats);
+  const navigate = (post: WPPost) =>
+    router.push({
+      pathname: "/player",
+      params: { url: post.link, title: cleanTitle(post.title.rendered) },
+    } as any);
 
-      if (goodCats.length >= 3) {
-        setTaxMode("categories");
-        const secs = goodCats
-          .slice(0, SECTIONS_COUNT)
-          .map((t) => ({ id: t.id, title: t.name }));
-        setSections(secs);
-        await loadAllSections("categories", secs, mode);
-        return;
-      }
-
-      // 2) لو categories مش نافعة → جرّب Tags
-      const tags = await fetchTerms("tags");
-      const goodTags = pickGoodTerms(tags);
-
-      setTaxMode("tags");
-      const secs = goodTags
-        .slice(0, SECTIONS_COUNT)
-        .map((t) => ({ id: t.id, title: t.name }));
-      setSections(secs);
-      await loadAllSections("tags", secs, mode);
-    } catch (e) {
-      console.log("init error:", e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchTerms = async (mode: TaxMode): Promise<WPTerm[]> => {
-    const res = await axios.get(`${API_BASE}/${mode}`, {
-      params: {
-        per_page: 100,
-        hide_empty: true,
-      },
-    });
-    return (res.data || []) as WPTerm[];
-  };
-
-  // فلترة بسيطة عشان نطلع أقسام "حقيقية" (كورية/تركي/هندي... إلخ)
-  const pickGoodTerms = (terms: WPTerm[]) => {
-    return terms
-      .filter((t) => t && t.name && t.id)
-      .filter((t) => (t.count ?? 0) > 0)
-      .filter((t) => t.id !== MOVIES_CATEGORY) // لو نفس ID يظهر
-      .filter((t) => {
-        const n = t.name.toLowerCase();
-        return !["uncategorized", "غير مصنف"].some((x) => n.includes(x));
-      })
-      .slice(0, 30);
-  };
-
-  const loadAllSections = async (
-    modeTax: TaxMode,
-    secs: Section[],
-    m: "trending" | "latest",
-  ) => {
-    setLoading(true);
-    try {
-      const results = await Promise.all(
-        secs.map(async (s) => {
-          const posts = await fetchPostsForSection(modeTax, s.id, m);
-          return [s.id, posts] as const;
-        }),
-      );
-
-      const map: Record<number, WPPost[]> = {};
-      results.forEach(([id, posts]) => (map[id] = posts));
-      setPostsBySection(map);
-    } catch (e) {
-      console.log("loadAllSections error:", e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchPostsForSection = async (
-    modeTax: TaxMode,
-    termId: number,
-    m: "trending" | "latest",
-  ) => {
-    // IMPORTANT:
-    // "ترند" في WP الافتراضي مفيش orderby=views
-    // فبنقربها بـ modified (أحدث تفاعل/تحديث)
-    const orderby = m === "latest" ? "date" : "modified";
-    const order = "desc";
-
-    const params: any = {
-      per_page: 10,
-      page: 1,
-      _embed: true,
-      orderby,
-      order,
-      categories: MOVIES_CATEGORY, // أفلام فقط
-    };
-
-    if (modeTax === "tags") {
-      params.tags = termId;
-    } else {
-      // categories: لازم تضم MOVIES_CATEGORY + termId
-      params.categories = `${MOVIES_CATEGORY},${termId}`;
-    }
-
-    const res = await axios.get(`${API_BASE}/posts`, { params });
-    return (res.data || []) as WPPost[];
-  };
-
-  const cleanTitle = (htmlTitle: string) =>
-    htmlTitle
-      .replace(/<[^>]*>/g, "")
-      .replace(/&#\d+;/g, "")
-      .replace(/&[a-z]+;/gi, "")
-      .trim();
-
-  const getFeaturedImage = (post: WPPost) => {
-    const u = post._embedded?.["wp:featuredmedia"]?.[0]?.source_url;
+  if (loading) {
     return (
-      u || "https://via.placeholder.com/1200x700/111111/ffffff?text=No+Image"
+      <ThemedView style={s.container}>
+        <View style={s.center}>
+          <ActivityIndicator size="large" color="#b08d00" />
+          <Text style={s.loadTxt}>جاري تحميل الأفلام...</Text>
+        </View>
+      </ThemedView>
     );
-  };
+  }
 
-  const toSliderItems = (posts: WPPost[]) => {
-    return posts.map<SlideItem>((p) => ({
-      id: p.id,
-      title: cleanTitle(p.title?.rendered || "Untitled"),
-      image: getFeaturedImage(p),
-      onPress: () =>
-        router.push({
-          pathname: "/player",
-          params: { url: p.link, title: cleanTitle(p.title.rendered) },
-        } as any),
-    }));
-  };
-
-  const leftBtnText = mode === "latest" ? "مضاف حديثًا" : "ترند";
+  if (error) {
+    return (
+      <ThemedView style={s.container}>
+        <View style={s.center}>
+          <Text style={{ fontSize: 40, marginBottom: 12 }}>⚠️</Text>
+          <Text style={s.loadTxt}>فشل تحميل البيانات</Text>
+          <TouchableOpacity style={s.retryBtn} onPress={load}>
+            <Text style={s.retryTxt}>إعادة المحاولة</Text>
+          </TouchableOpacity>
+        </View>
+      </ThemedView>
+    );
+  }
 
   return (
-    <ThemedView style={styles.container}>
-      {/* Top: logo area is optional — هنا بس فلترين زي ArabSeed */}
-      <View style={styles.topFilters}>
-        <Pressable
-          onPress={() => setMode("trending")}
-          style={[
-            styles.filterBtn,
-            mode === "trending" && styles.filterBtnActive,
-          ]}
-        >
-          <Text style={styles.filterText}>ترند</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={() => setMode("latest")}
-          style={[
-            styles.filterBtn,
-            mode === "latest" && styles.filterBtnActive,
-          ]}
-        >
-          <Text style={styles.filterText}>مضاف حديثًا</Text>
-        </Pressable>
-      </View>
-
-      {loading && sections.length === 0 ? (
-        <View style={styles.pageLoading}>
-          <ActivityIndicator size="large" color="#b08d00" />
-          <ThemedText style={{ marginTop: 10, color: "#fff", opacity: 0.8 }}>
-            جاري التحميل...
-          </ThemedText>
-        </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={{ paddingBottom: 24 }}
-          showsVerticalScrollIndicator={false}
-        >
-          {sections.map((s) => (
-            <SectionSlider
-              key={s.id}
-              sectionTitle={s.title}
-              leftButtonText={`احدث الأفلام`}
-              items={toSliderItems(postsBySection[s.id] || [])}
-              autoMs={AUTO_MS}
-            />
-          ))}
-
-          {/* تحميل خفيف أثناء تغيير المود */}
-          {loading ? (
-            <View style={{ paddingVertical: 18, alignItems: "center" }}>
-              <ActivityIndicator size="small" color="#b08d00" />
-              <Text style={{ color: "#fff", opacity: 0.7, marginTop: 8 }}>
-                تحديث {leftBtnText}...
-              </Text>
-            </View>
-          ) : null}
-
-          {/* Debug صغير (اختياري) */}
-          <Text style={styles.debug}>
-            {taxMode ? `Filter Source: ${taxMode}` : ""}
-          </Text>
-        </ScrollView>
-      )}
+    <ThemedView style={s.container}>
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: 40, paddingTop: 54 }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              setRefreshing(true);
+              load();
+            }}
+            tintColor="#b08d00"
+          />
+        }
+      >
+        {sections.map((sec) => (
+          <Banner key={sec.key} section={sec} onPress={navigate} />
+        ))}
+        {sections.length === 0 && (
+          <View style={[s.center, { paddingTop: 100 }]}>
+            <Text style={{ fontSize: 44, marginBottom: 12 }}>🎬</Text>
+            <Text style={s.loadTxt}>لا توجد أفلام حاليًا</Text>
+          </View>
+        )}
+      </ScrollView>
     </ThemedView>
   );
 }
 
-/* =========================
-   Styles (ArabSeed vibe)
-========================= */
-const styles = StyleSheet.create({
+const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0b0b0b" },
-
-  topFilters: {
-    marginTop: 46,
-    paddingHorizontal: 14,
-    flexDirection: "row",
-    gap: 12,
-    justifyContent: "center",
+  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  loadTxt: { color: "rgba(255,255,255,0.6)", marginTop: 12, fontSize: 14 },
+  retryBtn: {
+    marginTop: 20,
+    backgroundColor: "#b08d00",
+    paddingHorizontal: 28,
+    paddingVertical: 10,
+    borderRadius: 20,
   },
-  filterBtn: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(255,255,255,0.04)",
-    alignItems: "center",
-  },
-  filterBtnActive: {
-    borderColor: "#b08d00",
-    backgroundColor: "rgba(176,141,0,0.10)",
-  },
-  filterText: { color: "#fff", fontWeight: "900" },
-
-  pageLoading: { flex: 1, justifyContent: "center", alignItems: "center" },
-
-  sectionWrap: { marginTop: 14, alignItems: "center" },
-
-  sectionHeader: {
+  retryTxt: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  section: { marginTop: 22, alignItems: "center" },
+  hdr: {
     width: "100%",
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     marginBottom: 10,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
-
-  leftBtn: {
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(255,255,255,0.04)",
-  },
-  leftBtnText: { color: "#b08d00", fontWeight: "800" },
-
-  rightTitle: { flexDirection: "row", alignItems: "center", gap: 8 },
-  sectionTitle: { color: "#b08d00", fontWeight: "900", fontSize: 20 },
-  icon: { fontSize: 20 },
-
-  sliderCard: {
-    borderRadius: 24,
+  hdrTitle: { color: "#b08d00", fontWeight: "900", fontSize: 18 },
+  hdrCount: { color: "rgba(255,255,255,0.3)", fontSize: 12 },
+  card: {
+    borderRadius: 22,
     overflow: "hidden",
     backgroundColor: "#111",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.06)",
   },
-  sliderEmpty: { flex: 1, justifyContent: "center", alignItems: "center" },
-
+  img: { width: "100%", height: "100%" },
   fade: {
     position: "absolute",
     left: 0,
     right: 0,
     bottom: 0,
-    height: 90,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    height: 110,
+    backgroundColor: "rgba(0,0,0,0.65)",
   },
   itemTitle: {
     position: "absolute",
@@ -515,31 +357,50 @@ const styles = StyleSheet.create({
     bottom: 14,
     color: "#fff",
     fontWeight: "900",
-    fontSize: 16,
+    fontSize: 15,
     maxWidth: "75%",
     textAlign: "right",
   },
-
+  pill: {
+    position: "absolute",
+    left: 10,
+    top: 10,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: "rgba(176,141,0,0.45)",
+  },
+  pillTxt: { color: "#f0d060", fontSize: 11, fontWeight: "800" },
+  dots: {
+    position: "absolute",
+    bottom: 8,
+    alignSelf: "center",
+    flexDirection: "row",
+    gap: 5,
+  },
+  dot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.2)",
+  },
+  dotOn: { backgroundColor: "#b08d00", width: 16 },
   arrow: {
     position: "absolute",
     top: "50%",
-    marginTop: -22,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "rgba(15,15,15,0.80)",
+    marginTop: -20,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(0,0,0,0.7)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
+    borderColor: "rgba(255,255,255,0.08)",
   },
-  arrowLeft: { left: 12 },
-  arrowRight: { right: 12 },
-  arrowText: { color: "#cfcfcf", fontSize: 28, fontWeight: "900" },
-
-  debug: {
-    marginTop: 16,
-    textAlign: "center",
-    color: "rgba(255,255,255,0.35)",
-  },
+  aL: { left: 8 },
+  aR: { right: 8 },
+  arrowTxt: { color: "#ddd", fontSize: 26, fontWeight: "900" },
 });

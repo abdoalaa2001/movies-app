@@ -1,327 +1,296 @@
-import { ThemedText } from "@/components/themed-text";
+/**
+ * search.tsx — Search Screen
+ *
+ * Changes vs original:
+ *  - Search only fires on keyboard "search" press or submit — NOT on text change.
+ *  - Filter chips removed.
+ */
+
 import { ThemedView } from "@/components/themed-view";
 import axios from "axios";
 import { useRouter } from "expo-router";
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   ActivityIndicator,
+  Dimensions,
   FlatList,
   Image,
-  Keyboard,
   Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
+import {
+  BASE,
+  COUNTRY_META,
+  LANG_META,
+  WPPost,
+  cleanTitle,
+  getClass,
+  getThumb,
+  safeClassList,
+} from "./apiUtils";
 
-const API_BASE = "https://en.movizlands.com/wp-json/wp/v2";
+const W = Dimensions.get("window").width;
+const CARD_H = 100;
 
-const BG = "#0b0b0b";
-const GOLD = "#b08d00";
-
-interface SearchResult {
-  id: number;
-  title: { rendered: string };
-  link: string;
-  date: string;
-  categories?: number[];
-  _embedded?: {
-    "wp:featuredmedia"?: { source_url: string }[];
-  };
+function extractSeriesName(classList: string[]): string | null {
+  const cls = classList.find(
+    (c) => c.startsWith("series-") && !/^series-\d+$/.test(c),
+  );
+  return cls ? cls.slice(7).replace(/-+/g, " ").trim() : null;
 }
 
-// لو عندك IDs تانية للأفلام/المسلسلات غيّرها هنا فقط
-const MOVIES_CATEGORY = 79;
-const SERIES_CATEGORY = 9;
+function ResultRow({ post, onPress }: { post: WPPost; onPress: () => void }) {
+  const countryId = getClass(post, "country");
+  const langId = getClass(post, "language");
+  const flag = countryId ? COUNTRY_META[countryId]?.emoji : null;
+  const lbl = langId ? LANG_META[langId]?.label : null;
+  const series = extractSeriesName(safeClassList(post));
 
-type FilterMode = "all" | "movies" | "series";
+  return (
+    <Pressable style={row.card} onPress={onPress}>
+      <Image
+        source={{ uri: getThumb(post) }}
+        style={row.thumb}
+        resizeMode="cover"
+      />
+      <View style={row.info}>
+        {series && (
+          <Text style={row.series} numberOfLines={1}>
+            {series}
+          </Text>
+        )}
+        <Text style={row.title} numberOfLines={2}>
+          {cleanTitle(post.title.rendered)}
+        </Text>
+        {(flag || lbl) && (
+          <View style={row.pills}>
+            {flag && (
+              <View style={row.pill}>
+                <Text style={row.pillTxt}>{flag}</Text>
+              </View>
+            )}
+            {lbl && (
+              <View style={row.pill}>
+                <Text style={row.pillTxt}>{lbl}</Text>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+    </Pressable>
+  );
+}
 
 export default function SearchScreen() {
   const router = useRouter();
-
-  const [searchQuery, setSearchQuery] = useState("");
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<WPPost[]>([]);
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<FilterMode>("all");
+  const [empty, setEmpty] = useState(false);
+  const [hasError, setHasError] = useState(false);
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
-    Keyboard.dismiss();
-
+  const search = useCallback(async () => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    setLoading(true);
+    setEmpty(false);
+    setHasError(false);
     try {
-      setLoading(true);
-      const response = await axios.get(`${API_BASE}/posts`, {
-        params: {
-          search: searchQuery,
-          per_page: 50,
-          _embed: true,
-        },
+      const { data } = await axios.get<WPPost[]>(`${BASE}/posts`, {
+        params: { search: trimmed, per_page: 50, _embed: true },
+        timeout: 12_000,
       });
-      setResults(response.data || []);
-    } catch (error) {
-      console.error("Error:", error);
+      const posts = data ?? [];
+      setResults(posts);
+      setEmpty(posts.length === 0);
+    } catch {
       setResults([]);
+      setHasError(true);
     } finally {
       setLoading(false);
     }
+  }, [query]);
+
+  const clearSearch = () => {
+    setQuery("");
+    setResults([]);
+    setEmpty(false);
+    setHasError(false);
   };
 
-  const getFeaturedImage = (item: SearchResult): string => {
-    const u = item._embedded?.["wp:featuredmedia"]?.[0]?.source_url;
-    return (
-      u || "https://via.placeholder.com/1200x700/111111/ffffff?text=No+Image"
-    );
-  };
-
-  const cleanTitle = (htmlTitle: string): string => {
-    return htmlTitle
-      .replace(/<[^>]*>/g, "")
-      .replace(/&#\d+;/g, "")
-      .replace(/&[a-z]+;/gi, "")
-      .trim();
-  };
-
-  const handlePress = (item: SearchResult) => {
+  const navigate = (post: WPPost) =>
     router.push({
       pathname: "/player",
-      params: {
-        url: item.link,
-        title: cleanTitle(item.title.rendered),
-      },
+      params: { url: post.link, title: cleanTitle(post.title.rendered) },
     } as any);
-  };
-
-  // فلتر اختياري (الكل/أفلام/مسلسلات) باستخدام categories اللي موجودة في نفس الداتا
-  const filtered = useMemo(() => {
-    if (mode === "all") return results;
-
-    return results.filter((p) => {
-      const cats = p.categories || [];
-      if (mode === "movies") return cats.includes(MOVIES_CATEGORY);
-      if (mode === "series") return cats.includes(SERIES_CATEGORY);
-      return true;
-    });
-  }, [results, mode]);
-
-  const renderItem = ({ item }: { item: SearchResult }) => (
-    <Pressable style={styles.card} onPress={() => handlePress(item)}>
-      <Image
-        source={{ uri: getFeaturedImage(item) }}
-        style={styles.poster}
-        resizeMode="cover"
-      />
-
-      {/* Fade */}
-      <View style={styles.fade} />
-
-      {/* Title */}
-      <Text style={styles.title} numberOfLines={1}>
-        {cleanTitle(item.title.rendered)}
-      </Text>
-
-      {/* Date */}
-      <Text style={styles.date}>
-        {new Date(item.date).toLocaleDateString()}
-      </Text>
-    </Pressable>
-  );
 
   return (
-    <ThemedView style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <ThemedText style={styles.headerTitle}>🔍 البحث</ThemedText>
-        <ThemedText style={styles.headerSub}>ابحث عن فيلم أو مسلسل</ThemedText>
-      </View>
-
-      {/* Search box */}
-      <View style={styles.searchWrap}>
+    <ThemedView style={s.container}>
+      {/* Search bar */}
+      <View style={s.bar}>
+        <Pressable onPress={search} hitSlop={8}>
+          <Text style={s.icon}>🔍</Text>
+        </Pressable>
         <TextInput
-          style={styles.searchInput}
-          placeholder="اكتب اسم الفيلم/المسلسل..."
-          placeholderTextColor="rgba(255,255,255,0.45)"
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={handleSearch}
+          style={s.input}
+          value={query}
+          onChangeText={setQuery}
+          placeholder="ابحث عن مسلسل أو فيلم..."
+          placeholderTextColor="rgba(255,255,255,0.35)"
           returnKeyType="search"
+          onSubmitEditing={search}
+          autoCorrect={false}
+          autoCapitalize="none"
         />
-
-        <Pressable style={styles.searchBtn} onPress={handleSearch}>
-          <Text style={styles.searchBtnText}>بحث</Text>
-        </Pressable>
+        {query.length > 0 && (
+          <Pressable onPress={clearSearch} hitSlop={8}>
+            <Text style={s.clear}>✕</Text>
+          </Pressable>
+        )}
       </View>
 
-      {/* Filter pills (optional) */}
-      <View style={styles.pills}>
-        <Pressable
-          onPress={() => setMode("all")}
-          style={[styles.pill, mode === "all" && styles.pillActive]}
-        >
-          <Text style={styles.pillText}>الكل</Text>
-        </Pressable>
+      {/* Result count */}
+      {results.length > 0 && (
+        <Text style={s.count}>{results.length} نتيجة</Text>
+      )}
 
-        <Pressable
-          onPress={() => setMode("movies")}
-          style={[styles.pill, mode === "movies" && styles.pillActive]}
-        >
-          <Text style={styles.pillText}>أفلام</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={() => setMode("series")}
-          style={[styles.pill, mode === "series" && styles.pillActive]}
-        >
-          <Text style={styles.pillText}>مسلسلات</Text>
-        </Pressable>
-      </View>
-
-      {/* Content */}
+      {/* Content area */}
       {loading ? (
-        <View style={styles.loading}>
-          <ActivityIndicator size="large" color={GOLD} />
-          <ThemedText style={styles.loadingText}>جاري البحث...</ThemedText>
+        <View style={s.center}>
+          <ActivityIndicator size="large" color="#b08d00" />
         </View>
-      ) : filtered.length > 0 ? (
-        <FlatList
-          data={filtered}
-          renderItem={renderItem}
-          keyExtractor={(item) => String(item.id)}
-          contentContainerStyle={styles.list}
-          showsVerticalScrollIndicator={false}
-        />
+      ) : hasError ? (
+        <View style={s.center}>
+          <Text style={s.emptyIcon}>⚠️</Text>
+          <Text style={s.emptyTxt}>حدث خطأ في الاتصال</Text>
+          <Pressable onPress={search} style={s.retryBtn}>
+            <Text style={s.retryTxt}>إعادة المحاولة</Text>
+          </Pressable>
+        </View>
+      ) : empty ? (
+        <View style={s.center}>
+          <Text style={s.emptyIcon}>🔎</Text>
+          <Text style={s.emptyTxt}>لا توجد نتائج لـ "{query}"</Text>
+        </View>
+      ) : results.length === 0 ? (
+        <View style={s.center}>
+          <Text style={s.emptyIcon}>🎬</Text>
+          <Text style={s.emptyTxt}>ابحث عن أي محتوى</Text>
+          <Text style={s.emptyHint}>مسلسلات تركية، كورية، أفلام...</Text>
+        </View>
       ) : (
-        <View style={styles.empty}>
-          <ThemedText style={styles.emptyText}>
-            {searchQuery ? "لا توجد نتائج" : "ابدأ بالبحث..."}
-          </ThemedText>
-        </View>
+        <FlatList
+          data={results}
+          keyExtractor={(p) => String(p.id)}
+          contentContainerStyle={s.list}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          renderItem={({ item }) => (
+            <ResultRow post={item} onPress={() => navigate(item)} />
+          )}
+        />
       )}
     </ThemedView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: BG },
-
-  header: {
-    paddingHorizontal: 16,
-    paddingTop: 58,
-    paddingBottom: 14,
-  },
-  headerTitle: {
-    fontSize: 32,
-    fontWeight: "900",
-    color: GOLD,
-  },
-  headerSub: {
-    marginTop: 4,
-    color: "rgba(255,255,255,0.70)",
-    fontSize: 13,
-  },
-
-  searchWrap: {
-    flexDirection: "row",
-    paddingHorizontal: 16,
-    gap: 12,
-    marginTop: 6,
-  },
-  searchInput: {
+const s = StyleSheet.create({
+  container: { flex: 1, backgroundColor: "#0b0b0b" },
+  center: {
     flex: 1,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    color: "#fff",
-    fontSize: 16,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  searchBtn: {
-    backgroundColor: "rgba(176,141,0,0.18)",
-    borderRadius: 16,
-    paddingHorizontal: 20,
     justifyContent: "center",
-    borderWidth: 1,
-    borderColor: GOLD,
+    alignItems: "center",
+    paddingTop: 40,
   },
-  searchBtnText: {
+  bar: {
+    marginTop: 60,
+    marginHorizontal: 14,
+    marginBottom: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.07)",
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  icon: { fontSize: 18, marginRight: 8 },
+  input: {
+    flex: 1,
     color: "#fff",
     fontSize: 16,
-    fontWeight: "900",
+    textAlign: "right",
+    fontWeight: "600",
   },
-
-  pills: {
-    flexDirection: "row",
+  clear: { color: "rgba(255,255,255,0.4)", fontSize: 18, marginLeft: 8 },
+  count: {
+    color: "rgba(255,255,255,0.3)",
+    fontSize: 12,
+    textAlign: "right",
     paddingHorizontal: 16,
-    gap: 10,
-    marginTop: 12,
-    marginBottom: 8,
+    marginBottom: 4,
   },
-  pill: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 999,
-    alignItems: "center",
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
+  list: { paddingHorizontal: 14, paddingBottom: 30 },
+  emptyIcon: { fontSize: 40, marginBottom: 12 },
+  emptyTxt: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 16,
+    textAlign: "center",
   },
-  pillActive: {
-    backgroundColor: "rgba(176,141,0,0.12)",
-    borderColor: GOLD,
+  emptyHint: { color: "rgba(255,255,255,0.25)", fontSize: 13, marginTop: 6 },
+  retryBtn: {
+    marginTop: 14,
+    backgroundColor: "#b08d00",
+    paddingHorizontal: 22,
+    paddingVertical: 8,
+    borderRadius: 16,
   },
-  pillText: { color: "#fff", fontWeight: "900" },
+  retryTxt: { color: "#fff", fontWeight: "700" },
+});
 
-  loading: { flex: 1, justifyContent: "center", alignItems: "center" },
-  loadingText: { marginTop: 12, color: "#fff", opacity: 0.8 },
-
-  empty: { flex: 1, justifyContent: "center", alignItems: "center" },
-  emptyText: { color: "#fff", opacity: 0.5, fontSize: 16 },
-
-  list: {
-    paddingHorizontal: 14,
-    paddingBottom: 24,
-    paddingTop: 6,
-    gap: 12,
-  },
-
-  // Wide card like ArabSeed sections (but vertical list)
+const row = StyleSheet.create({
   card: {
-    width: "100%",
-    height: 190,
-    borderRadius: 22,
+    flexDirection: "row",
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderRadius: 14,
     overflow: "hidden",
-    backgroundColor: "#111",
+    marginBottom: 10,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.07)",
+    height: CARD_H,
   },
-  poster: { width: "100%", height: "100%" },
-
-  fade: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: 92,
-    backgroundColor: "rgba(0,0,0,0.60)",
+  thumb: { width: CARD_H * 0.75, height: CARD_H },
+  info: {
+    flex: 1,
+    padding: 10,
+    justifyContent: "center",
+    alignItems: "flex-end",
+  },
+  series: {
+    color: "#b08d00",
+    fontSize: 10,
+    fontWeight: "700",
+    marginBottom: 3,
   },
   title: {
-    position: "absolute",
-    right: 14,
-    bottom: 34,
     color: "#fff",
-    fontSize: 16,
-    fontWeight: "900",
-    maxWidth: "78%",
+    fontSize: 13,
+    fontWeight: "800",
     textAlign: "right",
+    marginBottom: 6,
   },
-  date: {
-    position: "absolute",
-    right: 14,
-    bottom: 14,
-    color: "rgba(255,255,255,0.75)",
-    fontSize: 12,
-    fontWeight: "700",
+  pills: { flexDirection: "row", gap: 6, justifyContent: "flex-end" },
+  pill: {
+    backgroundColor: "rgba(176,141,0,0.2)",
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: "rgba(176,141,0,0.35)",
   },
+  pillTxt: { color: "#c9a830", fontSize: 10, fontWeight: "700" },
 });

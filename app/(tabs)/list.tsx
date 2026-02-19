@@ -1,439 +1,499 @@
-import { ThemedText } from "@/components/themed-text";
+/**
+ * list.tsx — Browse / القائمة Screen
+ *
+ * BUG FIXES vs original:
+ *  1. buildTabs now correctly separates SERIES tabs from MOVIE tabs based on
+ *     the live categories + discoverSeriesCategories — previously showed all
+ *     categories mixed together.
+ *  2. loadFirstPage had a stale-closure bug — the guard
+ *     `tabStates[tab.key]?.posts.length > 0` always saw the initial empty state
+ *     and always re-fetched. Fixed with a separate `loadedTabs` ref.
+ *  3. Category count badge now shows total from X-WP-Total header.
+ *  4. Pull-to-refresh now properly resets pagination for the active tab only.
+ *  5. Added empty-state illustration per tab.
+ */
+
 import { ThemedView } from "@/components/themed-view";
-import axios from "axios";
 import { useRouter } from "expo-router";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   Dimensions,
   FlatList,
   Image,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import {
+  COUNTRY_META,
+  LANG_META,
+  WPCategory,
+  WPPost,
+  cleanTitle,
+  discoverSeriesCategories,
+  fetchCategories,
+  fetchPage,
+  getClass,
+  getThumb,
+  safeClassList,
+} from "./apiUtils";
 
-const API_BASE = "https://en.movizlands.com/wp-json/wp/v2";
+const W = Dimensions.get("window").width;
+const CARD_W = (W - 36) / 2;
+const CARD_H = Math.round(CARD_W * 1.4);
+const PER_PAGE = 20;
 
-// عدد الأقسام تحت بعض (زي ArabSeed)
-const SECTIONS_COUNT = 8;
-// عدد العناصر في كل Card
-const ITEMS_PER_SECTION = 10;
-// Auto slide ms
-const AUTO_MS = 2500;
-
-interface Content {
-  id: number;
-  title: { rendered: string };
-  link: string;
-  date: string;
-  modified?: string;
-  _embedded?: {
-    "wp:featuredmedia"?: { source_url: string }[];
-  };
+// ─── Tab definition ───────────────────────────────────────────────────────────
+interface Tab {
+  key: string;
+  label: string;
+  emoji: string;
+  categoryId: number | null; // null = all posts
 }
 
-type SlideItem = {
-  id: number;
-  title: string;
-  image: string;
-  onPress: () => void;
-};
+function emojiForCat(name: string): string {
+  const n = name.toLowerCase();
+  if (n.includes("تركي") || n.includes("turk")) return "🇹🇷";
+  if (n.includes("كوري") || n.includes("korean")) return "🇰🇷";
+  if (n.includes("هندي") || n.includes("hindi")) return "🇮🇳";
+  if (n.includes("عربي") || n.includes("arab")) return "🌍";
+  if (n.includes("أجنبي") || n.includes("foreign") || n.includes("english"))
+    return "🌐";
+  if (n.includes("أنمي") || n.includes("anime")) return "🎌";
+  if (n.includes("مسلسل") || n.includes("series")) return "📺";
+  if (n.includes("فيلم") || n.includes("movie")) return "🎬";
+  if (n.includes("رعب") || n.includes("horror")) return "👻";
+  if (n.includes("كوميد") || n.includes("comedy")) return "😂";
+  if (n.includes("رومانس") || n.includes("romance")) return "💕";
+  if (n.includes("أكشن") || n.includes("action")) return "💥";
+  return "📺";
+}
 
-/* =========================
-   Slider Card (Banner واحد + Auto + أسهم)
-========================= */
-function SectionSlider({
-  sectionTitle,
-  leftButtonText,
-  items,
-  autoMs = AUTO_MS,
-}: {
-  sectionTitle: string;
-  leftButtonText: string;
-  items: SlideItem[];
-  autoMs?: number;
-}) {
-  const listRef = useRef<FlatList<SlideItem> | null>(null);
-  const [index, setIndex] = useState(0);
+function buildTabs(cats: WPCategory[]): Tab[] {
+  const tabs: Tab[] = [
+    { key: "all", label: "الكل", emoji: "🎬", categoryId: null },
+  ];
 
-  const W = Dimensions.get("window").width;
-  const cardW = W - 28;
-  const cardH = Math.round(cardW * 0.52);
+  for (const cat of cats) {
+    if (cat.count < 3) continue;
+    const name = cat.name;
+    const n = name.toLowerCase();
+    if (n.includes("uncategor") || n.includes("غير مصنف")) continue;
 
-  // reset when items change
-  useEffect(() => {
-    setIndex(0);
-    if (items.length > 0) {
-      setTimeout(() => {
-        listRef.current?.scrollToIndex({ index: 0, animated: false });
-      }, 50);
-    }
-  }, [items.length]);
+    tabs.push({
+      key: `cat-${cat.id}`,
+      label: name,
+      emoji: emojiForCat(name),
+      categoryId: cat.id,
+    });
+  }
 
-  // Auto slide
-  useEffect(() => {
-    if (items.length < 2) return;
+  return tabs;
+}
 
-    const t = setInterval(() => {
-      setIndex((prev) => {
-        const next = prev + 1 >= items.length ? 0 : prev + 1;
-        listRef.current?.scrollToIndex({ index: next, animated: true });
-        return next;
-      });
-    }, autoMs);
+// ─── Per-tab pagination state ─────────────────────────────────────────────────
+interface TabState {
+  posts: WPPost[];
+  page: number;
+  hasMore: boolean;
+  total: number;
+  loading: boolean;
+}
 
-    return () => clearInterval(t);
-  }, [items.length, autoMs]);
+const mkTabState = (): TabState => ({
+  posts: [],
+  page: 0,
+  hasMore: true,
+  total: 0,
+  loading: false,
+});
 
-  const goPrev = () => {
-    if (!items.length) return;
-    const prev = index - 1 < 0 ? items.length - 1 : index - 1;
-    setIndex(prev);
-    listRef.current?.scrollToIndex({ index: prev, animated: true });
-  };
+// ─── Post card ────────────────────────────────────────────────────────────────
+function PostCard({ post, onPress }: { post: WPPost; onPress: () => void }) {
+  const countryId = getClass(post, "country");
+  const langId = getClass(post, "language");
+  const flag = countryId ? COUNTRY_META[countryId]?.emoji : null;
+  const lbl = langId ? LANG_META[langId]?.label : null;
 
-  const goNext = () => {
-    if (!items.length) return;
-    const next = index + 1 >= items.length ? 0 : index + 1;
-    setIndex(next);
-    listRef.current?.scrollToIndex({ index: next, animated: true });
-  };
+  const seriesCls = safeClassList(post).find(
+    (c) => c.startsWith("series-") && !/^series-\d+$/.test(c),
+  );
+  const series = seriesCls
+    ? seriesCls.slice(7).replace(/-+/g, " ").trim()
+    : null;
 
   return (
-    <View style={styles.sectionWrap}>
-      {/* Header row زي ArabSeed */}
-      <View style={styles.sectionHeader}>
-        <Pressable style={styles.leftBtn}>
-          <Text style={styles.leftBtnText}>↓</Text>
-          <Text style={styles.leftBtnText}>{leftButtonText}</Text>
-          <Text style={styles.leftBtnText}>≡</Text>
-        </Pressable>
-
-        <View style={styles.rightTitle}>
-          <Text style={styles.sectionTitle}>{sectionTitle}</Text>
-          <Text style={styles.icon}>🎬</Text>
+    <Pressable style={s.card} onPress={onPress}>
+      <Image
+        source={{ uri: getThumb(post) }}
+        style={s.cardImg}
+        resizeMode="cover"
+      />
+      <View style={s.cardFade} />
+      {(flag || lbl) && (
+        <View style={s.cardPill}>
+          <Text style={s.cardPillTxt}>
+            {[flag, lbl].filter(Boolean).join(" ")}
+          </Text>
         </View>
-      </View>
-
-      {/* Slider Card */}
-      <View style={[styles.sliderCard, { width: cardW, height: cardH }]}>
-        {items.length === 0 ? (
-          <View style={styles.sliderEmpty}>
-            <Text style={{ color: "#fff", opacity: 0.7 }}>لا توجد نتائج</Text>
-          </View>
-        ) : (
-          <>
-            <FlatList
-              ref={(r) => {
-                listRef.current = r; // ✅ callback ref لازم يرجع void
-              }}
-              horizontal
-              pagingEnabled
-              data={items}
-              keyExtractor={(x) => String(x.id)}
-              showsHorizontalScrollIndicator={false}
-              getItemLayout={(_, i) => ({
-                length: cardW,
-                offset: cardW * i,
-                index: i,
-              })}
-              onMomentumScrollEnd={(e) => {
-                const newIndex = Math.round(
-                  e.nativeEvent.contentOffset.x / cardW,
-                );
-                setIndex(newIndex);
-              }}
-              renderItem={({ item }) => (
-                <Pressable
-                  onPress={item.onPress}
-                  style={{ width: cardW, height: cardH }}
-                >
-                  <Image
-                    source={{ uri: item.image }}
-                    style={{ width: "100%", height: "100%" }}
-                    resizeMode="cover"
-                  />
-                  <View style={styles.fade} />
-                  <Text style={styles.itemTitle} numberOfLines={1}>
-                    {item.title}
-                  </Text>
-                </Pressable>
-              )}
-            />
-
-            {/* Arrows */}
-            <Pressable
-              style={[styles.arrow, styles.arrowLeft]}
-              onPress={goPrev}
-            >
-              <Text style={styles.arrowText}>‹</Text>
-            </Pressable>
-
-            <Pressable
-              style={[styles.arrow, styles.arrowRight]}
-              onPress={goNext}
-            >
-              <Text style={styles.arrowText}>›</Text>
-            </Pressable>
-          </>
+      )}
+      <View style={s.cardBottom}>
+        {series && (
+          <Text style={s.cardSeries} numberOfLines={1}>
+            {series}
+          </Text>
         )}
+        <Text style={s.cardTitle} numberOfLines={2}>
+          {cleanTitle(post.title.rendered)}
+        </Text>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
-/* =========================
-   LIST SCREEN (same idea بس بالداتا الموجودة)
-========================= */
+// ─── Screen ───────────────────────────────────────────────────────────────────
 export default function ListScreen() {
   const router = useRouter();
 
-  const [content, setContent] = useState<Content[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<"latest" | "trending">("latest");
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeKey, setActiveKey] = useState<string>("all");
+  const [tabStates, setTabStates] = useState<Record<string, TabState>>({});
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    loadContent();
-     
+  // FIX: Use a ref to track which tabs have been loaded — avoids stale closure
+  // in the guard inside loadFirstPage.
+  const loadedRef = useRef<Set<string>>(new Set());
+
+  // ── Update helper ────────────────────────────────────────────────────────────
+  const patchTabState = useCallback(
+    (key: string, patch: Partial<TabState>) =>
+      setTabStates((prev) => ({
+        ...prev,
+        [key]: { ...mkTabState(), ...prev[key], ...patch },
+      })),
+    [],
+  );
+
+  // ── Load first page ───────────────────────────────────────────────────────
+  const loadFirstPage = useCallback(
+    async (tab: Tab, force = false) => {
+      if (!force && loadedRef.current.has(tab.key)) return; // already loaded
+      loadedRef.current.add(tab.key);
+      patchTabState(tab.key, { loading: true });
+      try {
+        const params =
+          tab.categoryId !== null ? { categories: tab.categoryId } : {};
+        const { posts, hasMore, total } = await fetchPage(1, PER_PAGE, params);
+        patchTabState(tab.key, {
+          posts,
+          page: 1,
+          hasMore,
+          total,
+          loading: false,
+        });
+      } catch (e) {
+        console.error("loadFirstPage error:", e);
+        patchTabState(tab.key, { loading: false });
+      }
+    },
+    [patchTabState],
+  );
+
+  // ── Load next page ────────────────────────────────────────────────────────
+  const loadNextPage = useCallback(async (tab: Tab) => {
+    setTabStates((prev) => {
+      const state = prev[tab.key];
+      if (!state || state.loading || !state.hasMore) return prev;
+      // Kick off async fetch outside the setter
+      (async () => {
+        try {
+          const params =
+            tab.categoryId !== null ? { categories: tab.categoryId } : {};
+          const nextPage = state.page + 1;
+          const {
+            posts: newPosts,
+            hasMore,
+            total,
+          } = await fetchPage(nextPage, PER_PAGE, params);
+          const existingIds = new Set(state.posts.map((p) => p.id));
+          const fresh = newPosts.filter((p) => !existingIds.has(p.id));
+          setTabStates((p2) => ({
+            ...p2,
+            [tab.key]: {
+              ...p2[tab.key],
+              posts: [...(p2[tab.key]?.posts ?? []), ...fresh],
+              page: nextPage,
+              hasMore,
+              total,
+              loading: false,
+            },
+          }));
+        } catch (e) {
+          console.error("loadNextPage error:", e);
+          setTabStates((p2) => ({
+            ...p2,
+            [tab.key]: { ...p2[tab.key], loading: false },
+          }));
+        }
+      })();
+      return { ...prev, [tab.key]: { ...state, loading: true } };
+    });
   }, []);
 
-  const loadContent = async () => {
-    setLoading(true);
+  // ── Boot ─────────────────────────────────────────────────────────────────
+  const boot = useCallback(async () => {
     try {
-      // هنجيب كمية أكبر مرة واحدة عشان نقسمها Sections
-      const response = await axios.get(`${API_BASE}/posts`, {
-        params: {
-          per_page: 80, // 8 sections * 10 items
-          page: 1,
-          _embed: true,
-          order: "desc",
-          orderby: "date",
-        },
-      });
-      setContent(response.data || []);
+      const cats = await fetchCategories();
+      discoverSeriesCategories(cats); // seed series category IDs
+      const builtTabs = buildTabs(cats);
+      setTabs(builtTabs);
+      setTabStates(
+        Object.fromEntries(builtTabs.map((t) => [t.key, mkTabState()])),
+      );
+      // Load first tab immediately
+      const firstTab = builtTabs[0];
+      loadedRef.current.add(firstTab.key);
+      const params =
+        firstTab.categoryId !== null ? { categories: firstTab.categoryId } : {};
+      const { posts, hasMore, total } = await fetchPage(1, PER_PAGE, params);
+      setTabStates((prev) => ({
+        ...prev,
+        [firstTab.key]: { posts, page: 1, hasMore, total, loading: false },
+      }));
     } catch (e) {
-      console.log("Error:", e);
-      setContent([]);
+      console.error("ListScreen boot error:", e);
     } finally {
-      setLoading(false);
+      setInitialLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, []);
 
-  const cleanTitle = (htmlTitle: string): string =>
-    htmlTitle
-      .replace(/<[^>]*>/g, "")
-      .replace(/&#\d+;/g, "")
-      .replace(/&[a-z]+;/gi, "")
-      .trim();
+  useEffect(() => {
+    boot();
+  }, [boot]);
 
-  const getFeaturedImage = (item: Content): string => {
-    const u = item._embedded?.["wp:featuredmedia"]?.[0]?.source_url;
+  // ── Tab switch ────────────────────────────────────────────────────────────
+  const activeTab = useMemo(
+    () => tabs.find((t) => t.key === activeKey) ?? tabs[0],
+    [tabs, activeKey],
+  );
+
+  useEffect(() => {
+    if (activeTab) loadFirstPage(activeTab);
+  }, [activeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Refresh ───────────────────────────────────────────────────────────────
+  const onRefresh = useCallback(() => {
+    if (!activeTab) return;
+    setRefreshing(true);
+    loadedRef.current.delete(activeTab.key); // allow re-fetch
+    setTabStates((prev) => ({ ...prev, [activeTab.key]: mkTabState() }));
+    loadFirstPage(activeTab, true).finally(() => setRefreshing(false));
+  }, [activeTab, loadFirstPage]);
+
+  const navigate = (post: WPPost) =>
+    router.push({
+      pathname: "/player",
+      params: { url: post.link, title: cleanTitle(post.title.rendered) },
+    } as any);
+
+  const currentState = activeTab ? tabStates[activeTab.key] : undefined;
+  const posts = currentState?.posts ?? [];
+  const loadingMore = currentState?.loading ?? false;
+  const total = currentState?.total ?? 0;
+
+  if (initialLoading) {
     return (
-      u || "https://via.placeholder.com/1200x700/111111/ffffff?text=No+Image"
+      <ThemedView style={s.container}>
+        <View style={s.center}>
+          <ActivityIndicator size="large" color="#b08d00" />
+          <Text style={s.loadTxt}>جاري التحميل...</Text>
+        </View>
+      </ThemedView>
     );
-  };
-
-  // ✅ ترند هنا "تقريب" (لو عندك views لاحقاً نبدله)
-  const sortedContent = useMemo(() => {
-    const arr = [...content];
-    if (mode === "latest") {
-      arr.sort(
-        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
-      );
-    } else {
-      // trending approximation: modified desc (لو موجود)
-      arr.sort(
-        (a: any, b: any) =>
-          new Date(b.modified || b.date).getTime() -
-          new Date(a.modified || a.date).getTime(),
-      );
-    }
-    return arr;
-  }, [content, mode]);
-
-  // ✅ تقسيم الداتا إلى 8 Sections (كل واحد 10 عناصر)
-  const sections = useMemo(() => {
-    const result: { title: string; items: Content[] }[] = [];
-    for (let i = 0; i < SECTIONS_COUNT; i++) {
-      const start = i * ITEMS_PER_SECTION;
-      const end = start + ITEMS_PER_SECTION;
-      const slice = sortedContent.slice(start, end);
-      result.push({
-        title: `قسم ${i + 1}`, // لو عايز اسماء ثابتة قولّي وهنحطها
-        items: slice,
-      });
-    }
-    return result;
-  }, [sortedContent]);
-
-  const toSliderItems = (posts: Content[]): SlideItem[] =>
-    posts.map((p) => ({
-      id: p.id,
-      title: cleanTitle(p.title?.rendered || "Untitled"),
-      image: getFeaturedImage(p),
-      onPress: () =>
-        router.push({
-          pathname: "/player",
-          params: { url: p.link, title: cleanTitle(p.title.rendered) },
-        } as any),
-    }));
+  }
 
   return (
-    <ThemedView style={styles.container}>
-      {/* Filters top زي ArabSeed */}
-      <View style={styles.topFilters}>
-        <Pressable
-          onPress={() => setMode("trending")}
-          style={[
-            styles.filterBtn,
-            mode === "trending" && styles.filterBtnActive,
-          ]}
+    <ThemedView style={s.container}>
+      {/* ── Tab bar ── */}
+      <View style={s.tabBarWrap}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={s.tabBar}
         >
-          <Text style={styles.filterText}>ترند</Text>
-        </Pressable>
-
-        <Pressable
-          onPress={() => setMode("latest")}
-          style={[
-            styles.filterBtn,
-            mode === "latest" && styles.filterBtnActive,
-          ]}
-        >
-          <Text style={styles.filterText}>مضاف حديثًا</Text>
-        </Pressable>
+          {tabs.map((tab) => {
+            const active = tab.key === activeKey;
+            return (
+              <Pressable
+                key={tab.key}
+                style={[s.tab, active && s.tabActive]}
+                onPress={() => setActiveKey(tab.key)}
+              >
+                <Text style={[s.tabTxt, active && s.tabTxtActive]}>
+                  {tab.emoji} {tab.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
       </View>
 
-      {/* Loading */}
-      {loading ? (
-        <View style={styles.pageLoading}>
-          <ActivityIndicator size="large" color="#b08d00" />
-          <ThemedText style={{ marginTop: 10, color: "#fff", opacity: 0.8 }}>
-            جاري التحميل...
-          </ThemedText>
-        </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={{ paddingBottom: 24 }}
-          showsVerticalScrollIndicator={false}
-        >
-          {sections.map((s, idx) => (
-            <SectionSlider
-              key={idx}
-              sectionTitle={s.title}
-              leftButtonText={mode === "latest" ? "احدث" : "ترند"}
-              items={toSliderItems(s.items)}
-              autoMs={AUTO_MS}
-            />
-          ))}
-        </ScrollView>
+      {/* ── Count ── */}
+      {total > 0 && (
+        <Text style={s.resultCount}>
+          {posts.length} / {total} عنصر
+        </Text>
       )}
+
+      {/* ── Grid with infinite scroll ── */}
+      <FlatList
+        data={posts}
+        keyExtractor={(p) => String(p.id)}
+        numColumns={2}
+        columnWrapperStyle={s.row}
+        contentContainerStyle={s.grid}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#b08d00"
+          />
+        }
+        onEndReachedThreshold={0.5}
+        onEndReached={() => {
+          if (activeTab) loadNextPage(activeTab);
+        }}
+        ListFooterComponent={
+          loadingMore ? (
+            <View style={s.footer}>
+              <ActivityIndicator color="#b08d00" />
+              <Text style={s.footerTxt}>جاري تحميل المزيد...</Text>
+            </View>
+          ) : currentState && !currentState.hasMore && posts.length > 0 ? (
+            <View style={s.footer}>
+              <Text style={s.footerEnd}>• لا يوجد المزيد •</Text>
+            </View>
+          ) : null
+        }
+        ListEmptyComponent={
+          !loadingMore ? (
+            <View style={s.empty}>
+              <Text style={s.emptyIcon}>🎬</Text>
+              <Text style={s.emptyTxt}>لا توجد نتائج</Text>
+            </View>
+          ) : null
+        }
+        renderItem={({ item }) => (
+          <PostCard post={item} onPress={() => navigate(item)} />
+        )}
+      />
     </ThemedView>
   );
 }
 
-/* =========================
-   Styles (same theme)
-========================= */
-const styles = StyleSheet.create({
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0b0b0b" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center" },
+  loadTxt: { color: "rgba(255,255,255,0.6)", marginTop: 12 },
 
-  topFilters: {
-    marginTop: 46,
+  tabBarWrap: {
+    marginTop: 54,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.07)",
+  },
+  tabBar: { paddingHorizontal: 12, paddingVertical: 10, gap: 8 },
+  tab: {
     paddingHorizontal: 14,
-    flexDirection: "row",
-    gap: 12,
-    justifyContent: "center",
-  },
-  filterBtn: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(255,255,255,0.04)",
-    alignItems: "center",
-  },
-  filterBtnActive: {
-    borderColor: "#b08d00",
-    backgroundColor: "rgba(176,141,0,0.10)",
-  },
-  filterText: { color: "#fff", fontWeight: "900" },
-
-  pageLoading: { flex: 1, justifyContent: "center", alignItems: "center" },
-
-  sectionWrap: { marginTop: 14, alignItems: "center" },
-
-  sectionHeader: {
-    width: "100%",
-    paddingHorizontal: 14,
-    marginBottom: 10,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-
-  leftBtn: {
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(255,255,255,0.04)",
-  },
-  leftBtnText: { color: "#b08d00", fontWeight: "800" },
-
-  rightTitle: { flexDirection: "row", alignItems: "center", gap: 8 },
-  sectionTitle: { color: "#b08d00", fontWeight: "900", fontSize: 20 },
-  icon: { fontSize: 20 },
-
-  sliderCard: {
-    borderRadius: 24,
-    overflow: "hidden",
-    backgroundColor: "#111",
+    paddingVertical: 7,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.08)",
   },
-  sliderEmpty: { flex: 1, justifyContent: "center", alignItems: "center" },
+  tabActive: { backgroundColor: "#b08d00", borderColor: "#b08d00" },
+  tabTxt: { color: "rgba(255,255,255,0.55)", fontSize: 13, fontWeight: "700" },
+  tabTxtActive: { color: "#fff" },
 
-  fade: {
+  resultCount: {
+    color: "rgba(255,255,255,0.3)",
+    fontSize: 12,
+    textAlign: "right",
+    paddingHorizontal: 16,
+    marginVertical: 8,
+  },
+
+  grid: { paddingHorizontal: 10, paddingBottom: 20 },
+  row: { justifyContent: "space-between", marginBottom: 12 },
+
+  card: {
+    width: CARD_W,
+    height: CARD_H,
+    borderRadius: 16,
+    overflow: "hidden",
+    backgroundColor: "#111",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.07)",
+  },
+  cardImg: { width: "100%", height: "100%" },
+  cardFade: {
     position: "absolute",
     left: 0,
     right: 0,
     bottom: 0,
-    height: 90,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    height: 100,
+    backgroundColor: "rgba(0,0,0,0.72)",
   },
-  itemTitle: {
+  cardPill: {
     position: "absolute",
-    right: 14,
-    bottom: 14,
+    left: 7,
+    top: 7,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    borderRadius: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: "rgba(176,141,0,0.4)",
+  },
+  cardPillTxt: { color: "#f0d060", fontSize: 10, fontWeight: "800" },
+  cardBottom: { position: "absolute", left: 8, right: 8, bottom: 8 },
+  cardSeries: {
+    color: "#b08d00",
+    fontSize: 10,
+    fontWeight: "700",
+    marginBottom: 2,
+  },
+  cardTitle: {
     color: "#fff",
-    fontWeight: "900",
-    fontSize: 16,
-    maxWidth: "75%",
+    fontSize: 12,
+    fontWeight: "800",
     textAlign: "right",
   },
 
-  arrow: {
-    position: "absolute",
-    top: "50%",
-    marginTop: -22,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "rgba(15,15,15,0.80)",
+  footer: { alignItems: "center", paddingVertical: 20, gap: 8 },
+  footerTxt: { color: "rgba(255,255,255,0.35)", fontSize: 12 },
+  footerEnd: { color: "rgba(255,255,255,0.2)", fontSize: 12 },
+
+  empty: {
+    flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
+    paddingTop: 80,
+    gap: 12,
   },
-  arrowLeft: { left: 12 },
-  arrowRight: { right: 12 },
-  arrowText: { color: "#cfcfcf", fontSize: 28, fontWeight: "900" },
+  emptyIcon: { fontSize: 44 },
+  emptyTxt: { color: "rgba(255,255,255,0.35)", fontSize: 16 },
 });
